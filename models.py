@@ -1,7 +1,7 @@
 from enum import Enum
 
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import Column, func, MetaData
+from sqlalchemy import Column, func, Index, MetaData, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 
 naming_convention = {
@@ -35,8 +35,17 @@ class Customer(db.Model):
     name = Column(db.Text())
     jsonb_data = Column(JSONB)
     send_methods = Column(JSONB)
+    # перед прогоном генерируем ему id и при вставке/удалении записи в текущем прогоне указываем его id
+    # тогда при чистке просто удаляем все записи, которых не было в этом прогоне
+    # то есть last_seen_run_id не равен id прогона
+    last_seen_run_id = Column(Uuid(as_uuid=True))
     created_at = Column(db.DateTime, server_default=func.now())
     updated_at = Column(db.DateTime, onupdate=func.now())
+    __table_args__ = (
+        Index("ix_customer_login", "login"),
+        Index("ix_customer_name", "name"),
+        Index("ix_customer_last_seen_run_id", "last_seen_run_id"),
+    )
 
 
 class Lead(db.Model):
@@ -50,10 +59,17 @@ class Lead(db.Model):
     login = Column(db.Text())
     name = Column(db.Text())
     # связь с покупателем
-    customer_id = Column(db.BigInteger(), db.ForeignKey("customer.id", ondelete="CASCADE"), nullable=False)
+    customer_id = Column(db.BigInteger(), db.ForeignKey("customer.id", ondelete="CASCADE"), nullable=True)
     jsonb_data = Column(JSONB)
+    last_seen_run_id = Column(Uuid(as_uuid=True))
     created_at = Column(db.DateTime, server_default=func.now())
     updated_at = Column(db.DateTime, onupdate=func.now())
+    __table_args__ = (
+        Index("ix_lead_login", "login"),
+        Index("ix_lead_name", "name"),
+        Index("ix_lead_customer_id", "customer_id"),
+        Index("ix_lead_last_seen_run_id", "last_seen_run_id"),
+    )
 
 
 class AbstractCustomer(db.Model):
