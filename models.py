@@ -22,6 +22,40 @@ class AbcCustomerEntities(Enum):
     SendMethods = 'send_methods'
 
 
+class Customer(db.Model):
+    """
+    Таблица для покупателя.
+    jsonb_data - ответ CRM
+    основные используемые поля из ответа записываются в поля модели
+    """
+    __tablename__ = "customer"
+    id = Column(db.BigInteger(), nullable=False, primary_key=True)
+    crm_customer_id = Column(db.BigInteger(), nullable=False, unique=True)
+    login = Column(db.Text(), nullable=False)
+    name = Column(db.Text())
+    jsonb_data = Column(JSONB)
+    send_methods = Column(JSONB)
+    created_at = Column(db.DateTime, server_default=func.now())
+    updated_at = Column(db.DateTime, onupdate=func.now())
+
+
+class Lead(db.Model):
+    """
+    Таблица для сделки.
+    Аналогично Customer
+    """
+    __tablename__ = "lead"
+    id = Column(db.BigInteger(), nullable=False, primary_key=True)
+    crm_lead_id = Column(db.BigInteger(), nullable=False, unique=True)
+    login = Column(db.Text())
+    name = Column(db.Text())
+    # связь с покупателем
+    customer_id = Column(db.BigInteger(), db.ForeignKey("customer.id", ondelete="CASCADE"), nullable=False)
+    jsonb_data = Column(JSONB)
+    created_at = Column(db.DateTime, server_default=func.now())
+    updated_at = Column(db.DateTime, onupdate=func.now())
+
+
 class AbstractCustomer(db.Model):
     """
     "default" "general" : {
