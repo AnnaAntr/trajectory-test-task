@@ -20,11 +20,14 @@ def iter_customer_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[AmoCust
     Читает всех покупателей из CRM и отдает пакетами по BATCH_SIZE
     """
     customers = amocrm_get(AmoCustomer, _with=f"{COMPANIES},{CONTACTS}")
-    while True:
-        batch = list(islice(customers, batch_size))
-        if not batch:
-            return
-        yield batch
+    try:
+        while True:
+            batch = list(islice(customers, batch_size))
+            if not batch:
+                return
+            yield batch
+    finally:
+        customers.close()
 
 
 def iter_lead_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[AmoLead]]:
@@ -32,11 +35,14 @@ def iter_lead_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[AmoLead]]:
     Аналогично читает все сделки из CRM и отдает пакетами по BATCH_SIZE
     """
     leads = amocrm_get(AmoLead, _with=f"{CONTACTS}")
-    while True:
-        batch = list(islice(leads, batch_size))
-        if not batch:
-            return
-        yield batch
+    try:
+        while True:
+            batch = list(islice(leads, batch_size))
+            if not batch:
+                return
+            yield batch
+    finally:
+        leads.close()
 
 
 def lead_action(lead: AmoLead):
@@ -118,27 +124,29 @@ def collect_leads_customers(is_full=True):
                 }
         db.session.commit()
 
-    del customers
-    amo_leads: Iterator[AmoLead] = amocrm_get(AmoLead, _with=f"{CONTACTS}")
+    customers.close()
+
+    leads: Iterator[AmoLead] = amocrm_get(AmoLead, _with=f"{CONTACTS}")
     logger.info(f"Collected leads {is_full=}")
-    for amo_lead in amo_leads:
-        if is_full is False and amo_lead.status_id == 143:
+    for lead in leads:
+        if not is_full and lead.status_id == 143:
             continue
         try:
-            abc_customer = lead_action(amo_lead)
-            if is_full is True:
+            abc_customer = lead_action(lead)
+            if is_full:
                 if abc_customer.id in ids_map:
-                    ids_map[abc_customer.id]["leads"].append(amo_lead.id)
-                    ids_map[abc_customer.id]["contacts"].extend([c["id"] for c in amo_lead.contacts])
+                    ids_map[abc_customer.id]["leads"].append(lead.id)
+                    ids_map[abc_customer.id]["contacts"].extend([c["id"] for c in lead.contacts])
                 else:
                     ids_map[abc_customer.id] = {
                         "customers": [],
-                        "contacts": [c["id"] for c in amo_lead.contacts],
+                        "contacts": [c["id"] for c in lead.contacts],
                         "companies": [],
-                        "leads": [amo_lead.id],
+                        "leads": [lead.id],
                     }
         except Exception as e:
-            logger.exception(f'{amo_lead} {e}')
+            logger.exception(f'{lead} {e}')
+    leads.close()
 
     if is_full is False:
         return

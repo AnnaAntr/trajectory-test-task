@@ -52,7 +52,7 @@ def get_customer_json(customer: Customer) -> dict:
             'host': customer.custom_fields_values.get('Хост', {}).get('value'),
             'name': customer.name,
         },
-        'api_value': customer.as_dict()
+        'api_value': customer.to_json()
     }
 
 
@@ -63,7 +63,7 @@ def get_lead_json(lead: Lead) -> dict:
             'login': lead.custom_fields_values.get('Логин', {}).get('value'),
             'name': lead.name,
         },
-        'api_value': lead.as_dict()
+        'api_value': lead.to_json()
     }
 
 
