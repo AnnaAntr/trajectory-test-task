@@ -7,7 +7,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from abstract_customer import get_abccustomer_by_lead_login, create_or_update_customer, \
     get_abccustomer_by_amocustomer_login, dict_compare_merge, create_or_update_lead
-from amocrm import Customer, COMPANIES, CONTACTS, Lead, amocrm_get
+from amocrm import COMPANIES, CONTACTS, Customer as AmoCustomer, Lead as AmoLead, amocrm_get
 from models import db, AbstractCustomer
 
 logger = logging.getLogger(__name__)
@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 1000
 
 
-def iter_customer_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[Customer]]:
+def iter_customer_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[AmoCustomer]]:
     """
     Читает всех покупателей из CRM и отдает пакетами по BATCH_SIZE
     """
-    customers = amocrm_get(Customer, _with=f"{COMPANIES},{CONTACTS}")
+    customers = amocrm_get(AmoCustomer, _with=f"{COMPANIES},{CONTACTS}")
     while True:
         batch = list(islice(customers, batch_size))
         if not batch:
@@ -27,11 +27,11 @@ def iter_customer_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[Custome
         yield batch
 
 
-def iter_lead_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[Lead]]:
+def iter_lead_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[AmoLead]]:
     """
     Аналогично читает все сделки из CRM и отдает пакетами по BATCH_SIZE
     """
-    leads = amocrm_get(Lead, _with=f"{CONTACTS}")
+    leads = amocrm_get(AmoLead, _with=f"{CONTACTS}")
     while True:
         batch = list(islice(leads, batch_size))
         if not batch:
@@ -39,7 +39,7 @@ def iter_lead_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[Lead]]:
         yield batch
 
 
-def lead_action(lead: Lead):
+def lead_action(lead: AmoLead):
     abstract_customer = db.session.query(AbstractCustomer).filter(
         AbstractCustomer.amo_leads.op('@>')([{'general': {'id': lead.id}}])).first()
     lead_login = lead.get_field('Логин')
@@ -88,7 +88,7 @@ def collect_leads_customers(is_full=True):
     }
     """
     session = db.session
-    customers: Iterator[Customer] = amocrm_get(Customer, _with=f"{COMPANIES},{CONTACTS}")
+    customers: Iterator[AmoCustomer] = amocrm_get(AmoCustomer, _with=f"{COMPANIES},{CONTACTS}")
     logger.info(f"Collected customers {is_full=}")
 
     ids_map = {}
@@ -119,7 +119,7 @@ def collect_leads_customers(is_full=True):
         db.session.commit()
 
     del customers
-    amo_leads: Iterator[Lead] = amocrm_get(Lead, _with=f"{CONTACTS}")
+    amo_leads: Iterator[AmoLead] = amocrm_get(AmoLead, _with=f"{CONTACTS}")
     logger.info(f"Collected leads {is_full=}")
     for amo_lead in amo_leads:
         if is_full is False and amo_lead.status_id == 143:

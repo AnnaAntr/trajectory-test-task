@@ -1,3 +1,4 @@
+import inspect
 import time
 from typing import Type, Any, Iterator
 
@@ -74,6 +75,53 @@ class BaseEntity:
 
     def __repr__(self):
         return str(self)
+
+    @classmethod
+    def from_api(cls, data: dict):
+        """
+        Из ответа CRM собирает сущность
+        """
+        data = data or {}
+        params = inspect.signature(cls.__init__).parameters
+        fields = {}
+        for name, param in params.items():
+            if name == "self":
+                continue
+            if param.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD and \
+                    param.kind != inspect.Parameter.KEYWORD_ONLY:
+                continue
+            if name in data:
+                fields[name] = data[name]
+            else:
+                fields[name] = None
+
+        custom_fields_values = fields.get("custom_fields_values")
+        if not custom_fields_values:
+            fields["custom_fields_values"] = {}
+        elif isinstance(custom_fields_values, list):
+            converted = {}
+            for item in custom_fields_values:
+                field_name = item.get("name")
+                if not field_name:
+                    continue
+                values = item.get("values")
+                field_value = None
+                if values:
+                    field_value = values[0].get("value")
+                converted[field_name] = {"id": item.get("id"), "value": field_value}
+            fields["custom_fields_values"] = converted
+        return cls(**fields)
+
+    def to_json(self) -> dict:
+        """
+        Собирает JSON для хранения в поле jsonb_data сущности
+        """
+        result = {}
+        for key, value in vars(self).items():
+            if key.startswith("_"):
+                continue
+            result[key] = value
+        return result
 
     def get_field(self, field_name):
         return self.custom_fields_values.get(field_name, {}).get('value')
@@ -239,7 +287,6 @@ def amocrm_get(obj_cls: Type[BaseEntity],
     base_url = ""
     url = f"{base_url}{obj_cls.url}"
     entity_name = obj_cls.entity_name
-    schema = obj_cls.get_schema(many=True)
 
     while True:
         response = None
@@ -263,7 +310,8 @@ def amocrm_get(obj_cls: Type[BaseEntity],
             break
         if json_data is not None:
             counter = 0
-            for entity in schema.load(json_data['_embedded'][entity_name]):
+            for item in json_data['_embedded'][entity_name]:
+                entity = obj_cls.from_api(item)
                 counter += 1
                 skip_entity = False
                 if custom_filter:
