@@ -1,4 +1,5 @@
 import logging
+from itertools import islice
 from typing import Iterator, List, Dict
 
 from sqlalchemy import delete, select
@@ -10,6 +11,32 @@ from amocrm import Customer, COMPANIES, CONTACTS, Lead, amocrm_get
 from models import db, AbstractCustomer
 
 logger = logging.getLogger(__name__)
+
+BATCH_SIZE = 1000
+
+
+def iter_customer_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[Customer]]:
+    """
+    Читает всех покупателей из CRM и отдает пакетами по BATCH_SIZE
+    """
+    customers = amocrm_get(Customer, _with=f"{COMPANIES},{CONTACTS}")
+    while True:
+        batch = list(islice(customers, batch_size))
+        if not batch:
+            return
+        yield batch
+
+
+def iter_lead_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[Lead]]:
+    """
+    Аналогично читает все сделки из CRM и отдает пакетами по BATCH_SIZE
+    """
+    leads = amocrm_get(Lead, _with=f"{CONTACTS}")
+    while True:
+        batch = list(islice(leads, batch_size))
+        if not batch:
+            return
+        yield batch
 
 
 def lead_action(lead: Lead):
