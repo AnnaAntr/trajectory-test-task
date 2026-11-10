@@ -1,0 +1,12 @@
+import os
+from flask import Flask
+from models import db
+
+DB_URI = "postgresql+psycopg://postgres:postgres@localhost:5432/test_db"
+
+
+def create_app():
+    app = Flask(__name__)
+    app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", DB_URI)
+    db.init_app(app)
+    return app

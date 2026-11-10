@@ -1,5 +1,5 @@
 from typing import Dict, Optional
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from models import Customer, Lead, db
@@ -113,3 +113,76 @@ def load_leads_data():
         seen_logins.add(login)
         by_login[login] = customer_id
     return by_crm_id, by_login
+
+
+def merge_customers(first_id: int, second_id: int):
+    """
+    Мержит покупателя second в first
+    """
+    if first_id is None or second_id is None or first_id == second_id:
+        return False
+
+    rows = db.session.execute(
+        select(Customer.id, Customer.jsonb_data, Customer.send_methods).where(Customer.id.in_([first_id, second_id]))
+    ).all()
+
+    first_data = None
+    first_send = None
+    second_data = None
+    second_send = None
+    found_first = False
+    found_second = False
+
+    for customer_id, jsonb_data, send_methods in rows:
+        if customer_id == first_id:
+            first_data = jsonb_data
+            first_send = send_methods
+            found_first = True
+        elif customer_id == second_id:
+            second_data = jsonb_data
+            second_send = send_methods
+            found_second = True
+
+    if not found_first or not found_second:
+        return False
+
+    merged = dict(first_data or {})
+    second_data = second_data or {}
+    for key in ("contacts", "companies"):
+        merged_list = []
+        seen_ids = set()
+        items = (merged.get(key) or []) + (second_data.get(key) or [])
+
+        for item in items:
+            item_id = item.get("id")
+            if item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            merged_list.append(item)
+
+        merged[key] = merged_list
+
+    merged_send = []
+    seen_send = set()
+    send_items = (first_send or []) + (second_send or [])
+
+    for item in send_items:
+        key = (item.get("type"), item.get("value"))
+        if key in seen_send:
+            continue
+        seen_send.add(key)
+        merged_send.append(item)
+
+    db.session.execute(
+        update(Lead).where(Lead.customer_id == second_id).values(customer_id=first_id)
+    )
+    db.session.execute(
+        update(Customer).where(Customer.id == first_id).values(
+            jsonb_data=merged,
+            send_methods=merged_send or None,
+            updated_at=func.now(),
+        )
+    )
+    db.session.execute(delete(Customer).where(Customer.id == second_id))
+
+    return True

@@ -1,4 +1,5 @@
 import logging
+import uuid
 from itertools import islice
 from typing import Iterator, List, Dict, Optional
 
@@ -9,7 +10,7 @@ from abstract_customer import get_abccustomer_by_lead_login, create_or_update_cu
     get_abccustomer_by_amocustomer_login, dict_compare_merge, create_or_update_lead
 from amocrm import COMPANIES, CONTACTS, Customer as AmoCustomer, Lead as AmoLead, amocrm_get
 from models import db, AbstractCustomer, Customer, Lead
-from repository import upsert_customers, upsert_leads
+from repository import upsert_customers, upsert_leads, load_customers_data, load_leads_data, merge_customers
 
 logger = logging.getLogger(__name__)
 
@@ -95,18 +96,26 @@ def sync_leads(batch: List[AmoLead], run_id, customers_by_login: Dict[str, Optio
     for lead in batch:
         if is_full is False and lead.status_id == 143:
             continue
+        login = lead.get_field('Логин')
         existing = leads_by_crm_id.get(lead.id)
         customer_id = None
         if existing is not None:
             customer_id = existing[1]
+        by_login_customer_id = None
+        if login:
+            by_login_customer_id = customers_by_login.get(login)
+        if customer_id is not None and by_login_customer_id is not None and customer_id != by_login_customer_id:
+            if merge_customers(customer_id, by_login_customer_id):
+                customers_by_login[login] = customer_id
+                for crm_lead_id, cached in list(leads_by_crm_id.items()):
+                    if cached[1] == by_login_customer_id:
+                        leads_by_crm_id[crm_lead_id] = (cached[0], customer_id)
         if customer_id is None:
-            login = lead.get_field('Логин')
-            if login:
-                customer_id = customers_by_login.get(login)
+            customer_id = by_login_customer_id
 
         rows.append({
             'crm_lead_id': lead.id,
-            'login': lead.get_field('Логин'),
+            'login': login,
             'name': lead.name,
             'customer_id': customer_id,
             'jsonb_data': lead.to_json(),
@@ -160,92 +169,67 @@ def lead_action(lead: AmoLead):
     return create_or_update_lead(abstract_customer, lead)
 
 
-def collect_leads_customers(is_full=True):
+def collect_leads_customers(is_full: bool = True) -> bool:
     """
-     Берем всех покупателей, если его нет в бд - делаем новую запись AbstractCutomer, в него кладем.
-     Есть есть - находим его запись по id и перезаписываем
-
-     Вот так у нас коллектятся все кастомеры
-
-     Далее берутся все лиды. Ищутся их записи в бд по id, если не находится и есть логин
-     - находим его запись по кастомеру с тем же логином, кладем к нему.
-     Если нет логина/нет кастомера - пропускаем. Если нашелся - перезаписываем соответственно
-         abstract_id_customer : {
-        customers: [...],
-        leads: [...],
-        contacts: [...],
-        companies: [...]
-    }
+    completed=True выставляется только после полного прохода без исключений, чистка запускается только по нему
     """
-    session = db.session
-    customers: Iterator[AmoCustomer] = amocrm_get(AmoCustomer, _with=f"{COMPANIES},{CONTACTS}")
-    logger.info(f"Collected customers {is_full=}")
+    run_id = uuid.uuid4()
+    completed = False
 
-    ids_map = {}
-    for customer in customers:
-        if is_full is False and customer.status_id == 111349:
-            continue
-        customer_login = customer.get_field('Логин')
-        if not customer_login:
-            continue
-        abstract_customer = session.query(AbstractCustomer).filter(
-            AbstractCustomer.amo_customers.op('@>')([{'general': {'id': customer.id}}])).first()
+    customers_by_crm_id, customers_by_login = load_customers_data()
+    leads_by_crm_id, _ = load_leads_data()
+    logger.info(f"Started sync {run_id=} {is_full=} customers={len(customers_by_crm_id)} leads={len(leads_by_crm_id)}")
 
-        if not abstract_customer:
-            abstract_customer = get_abccustomer_by_lead_login(customer_login)  # почти всегда логины совпадают
-        abstract_customer = create_or_update_customer(abstract_customer, customer)
-        if is_full is True:
-            if abstract_customer.id in ids_map:
-                ids_map[abstract_customer.id]["customers"].append(customer.id)
-                ids_map[abstract_customer.id]["contacts"].extend([c["id"] for c in customer.contacts])
-                ids_map[abstract_customer.id]["companies"].extend([c["id"] for c in customer.companies])
-            else:
-                ids_map[abstract_customer.id] = {
-                    "customers": [customer.id],
-                    "contacts": [c["id"] for c in customer.contacts],
-                    "companies": [c["id"] for c in customer.companies],
-                    "leads": [],
-                }
-        db.session.commit()
-
-    customers.close()
-
-    leads: Iterator[AmoLead] = amocrm_get(AmoLead, _with=f"{CONTACTS}")
-    logger.info(f"Collected leads {is_full=}")
-    for lead in leads:
-        if not is_full and lead.status_id == 143:
-            continue
-        try:
-            abc_customer = lead_action(lead)
-            if is_full:
-                if abc_customer.id in ids_map:
-                    ids_map[abc_customer.id]["leads"].append(lead.id)
-                    ids_map[abc_customer.id]["contacts"].extend([c["id"] for c in lead.contacts])
-                else:
-                    ids_map[abc_customer.id] = {
-                        "customers": [],
-                        "contacts": [c["id"] for c in lead.contacts],
-                        "companies": [],
-                        "leads": [lead.id],
-                    }
-        except Exception as e:
-            logger.exception(f'{lead} {e}')
-    leads.close()
-
-    if is_full is False:
-        return
     try:
-        logger.info("Чистка покупателей общая")
-        stmt = delete(AbstractCustomer).where(
-            AbstractCustomer.id.not_in(ids_map.keys())
-        )
-        db.session.execute(stmt)
-        db.session.commit()
-        logger.info("Чистка покупателей на уровне сущностей")
-        for abc_customer in db.session.scalars(select(AbstractCustomer)).all():
-            filter_abc_customer(abc_customer=abc_customer, ids_map=ids_map)
+        for batch in iter_customer_batches():
+            saved = sync_customers(batch, run_id, is_full)
+
+            for customer in batch:
+                customer_id = saved.get(customer.id)
+
+                if customer_id is None:
+                    continue
+
+                customers_by_crm_id[customer.id] = customer_id
+                login = customer.get_field('Логин')
+
+                if not login:
+                    continue
+                if login in customers_by_login and customers_by_login[login] != customer_id:
+                    customers_by_login[login] = None
+                else:
+                    customers_by_login[login] = customer_id
+
+        # logger.info(f"Collected customers {run_id=} known={len(customers_by_crm_id)}")
+
+        for batch in iter_lead_batches():
+            saved = sync_leads(batch, run_id, customers_by_login, leads_by_crm_id, is_full)
+
+            for lead in batch:
+                lead_id = saved.get(lead.id)
+
+                if lead_id is None:
+                    continue
+
+                existing = leads_by_crm_id.get(lead.id)
+                customer_id = None
+
+                if existing is not None:
+                    customer_id = existing[1]
+                if customer_id is None:
+                    customer_id = customers_by_login.get(lead.get_field('Логин'))
+                leads_by_crm_id[lead.id] = (lead_id, customer_id)
+
+        # logger.info(f"Collected leads {run_id=} known={len(leads_by_crm_id)}")
+        completed = True
+
     except Exception as e:
-        logger.exception(f"Чистка: {e}")
+        logger.exception(f"Sync failed {run_id=}: {e}")
+
+    if completed and is_full:
+        logger.info(f"Sync completed, cleanup pending {run_id=}")
+
+    return completed
 
 
 def filter_merge_abstract_customer(abc_customer: AbstractCustomer, attr: str,
