@@ -1,6 +1,6 @@
 import logging
 from itertools import islice
-from typing import Iterator, List, Dict
+from typing import Iterator, List, Dict, Optional
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm.attributes import flag_modified
@@ -8,7 +8,8 @@ from sqlalchemy.orm.attributes import flag_modified
 from abstract_customer import get_abccustomer_by_lead_login, create_or_update_customer, \
     get_abccustomer_by_amocustomer_login, dict_compare_merge, create_or_update_lead
 from amocrm import COMPANIES, CONTACTS, Customer as AmoCustomer, Lead as AmoLead, amocrm_get
-from models import db, AbstractCustomer
+from models import db, AbstractCustomer, Customer, Lead
+from repository import upsert_customers, upsert_leads
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,89 @@ def iter_lead_batches(batch_size: int = BATCH_SIZE) -> Iterator[List[AmoLead]]:
             yield batch
     finally:
         leads.close()
+
+
+def sync_customers(batch: List[AmoCustomer], run_id, is_full: bool = True) -> Dict[int, int]:
+    """
+    Записывает пакет покупателей: 1 UPSERT + 1 COMMIT на пакет
+    Возвращает словарь {crm_customer_id: id}
+    """
+    rows = []
+    for customer in batch:
+        if is_full is False and customer.status_id == 111349:
+            continue
+        login = customer.get_field('Логин')
+        if not login:
+            continue
+        rows.append({
+            'crm_customer_id': customer.id,
+            'login': login,
+            'name': customer.name,
+            'jsonb_data': customer.to_json(),
+        })
+
+    if not rows:
+        return {}
+    upsert_customers(rows, run_id)
+    db.session.commit()
+
+    # id покупателей, которых записали в этом пакете
+    crm_ids = []
+    for row in rows:
+        crm_ids.append(row['crm_customer_id'])
+
+    query = select(Customer.id, Customer.crm_customer_id).where(Customer.crm_customer_id.in_(crm_ids))
+    # сопоставление crm_customer_id: id этого покупателя из БД
+    saved = {}
+    for customer_id, crm_customer_id in db.session.execute(query):
+        saved[crm_customer_id] = customer_id
+
+    return saved
+
+
+def sync_leads(batch: List[AmoLead], run_id, customers_by_login: Dict[str, Optional[int]],
+               leads_by_crm_id: Dict[int, tuple], is_full: bool = True) -> Dict[int, int]:
+    """
+    Записывает пакет сделок: 1 COMMIT на пачку
+    Если есть связь покупатель-сделка, то она сохраняется, иначе поиск по логину среди покупателей
+    Возвращает {crm_lead_id: id}
+    """
+    rows = []
+    for lead in batch:
+        if is_full is False and lead.status_id == 143:
+            continue
+        existing = leads_by_crm_id.get(lead.id)
+        customer_id = None
+        if existing is not None:
+            customer_id = existing[1]
+        if customer_id is None:
+            login = lead.get_field('Логин')
+            if login:
+                customer_id = customers_by_login.get(login)
+
+        rows.append({
+            'crm_lead_id': lead.id,
+            'login': lead.get_field('Логин'),
+            'name': lead.name,
+            'customer_id': customer_id,
+            'jsonb_data': lead.to_json(),
+        })
+
+    if not rows:
+        return {}
+    upsert_leads(rows, run_id)
+    db.session.commit()
+
+    crm_ids = []
+    for row in rows:
+        crm_ids.append(row['crm_lead_id'])
+
+    query = select(Lead.id, Lead.crm_lead_id).where(Lead.crm_lead_id.in_(crm_ids))
+    saved = {}
+    for lead_id, crm_lead_id in db.session.execute(query):
+        saved[crm_lead_id] = lead_id
+
+    return saved
 
 
 def lead_action(lead: AmoLead):

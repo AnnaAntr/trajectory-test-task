@@ -35,9 +35,11 @@ class Customer(db.Model):
     name = Column(db.Text())
     jsonb_data = Column(JSONB)
     send_methods = Column(JSONB)
-    # перед прогоном генерируем ему id и при вставке/удалении записи в текущем прогоне указываем его id
-    # тогда при чистке просто удаляем все записи, которых не было в этом прогоне
-    # то есть last_seen_run_id не равен id прогона
+    """
+    Перед прогоном генерируем ему id и при вставке/удалении записи в текущем прогоне указываем его id
+    Тогда при чистке просто удаляем все записи, которых не было в этом прогоне
+    То есть last_seen_run_id не равен id прогона
+    """
     last_seen_run_id = Column(Uuid(as_uuid=True))
     created_at = Column(db.DateTime, server_default=func.now())
     updated_at = Column(db.DateTime, onupdate=func.now())
