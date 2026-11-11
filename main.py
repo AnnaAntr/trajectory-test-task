@@ -3,18 +3,13 @@ import uuid
 from itertools import islice
 from typing import Iterator, List, Dict, Optional
 
-from sqlalchemy import delete, select
-from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy import select
 
-from abstract_customer import get_abccustomer_by_lead_login, create_or_update_customer, \
-    get_abccustomer_by_amocustomer_login, dict_compare_merge, create_or_update_lead
 from amocrm import COMPANIES, CONTACTS, Customer as AmoCustomer, Lead as AmoLead, amocrm_get
-from models import db, AbstractCustomer, Customer, Lead
-from repository import upsert_customers, upsert_leads, load_customers_data, load_leads_data, merge_customers, \
-    cleanup
+from models import db, Customer, Lead
+from repository import upsert_customers, upsert_leads, load_customers_data, load_leads_data, merge_customers, cleanup
 
 logger = logging.getLogger(__name__)
-
 BATCH_SIZE = 1000
 
 
@@ -139,37 +134,6 @@ def sync_leads(batch: List[AmoLead], run_id, customers_by_login: Dict[str, Optio
     return saved
 
 
-def lead_action(lead: AmoLead):
-    abstract_customer = db.session.query(AbstractCustomer).filter(
-        AbstractCustomer.amo_leads.op('@>')([{'general': {'id': lead.id}}])).first()
-    lead_login = lead.get_field('Логин')
-    if lead_login:
-        abs_customer_login = get_abccustomer_by_amocustomer_login(lead_login)
-        if abstract_customer is None:
-            abstract_customer = abs_customer_login
-        if abs_customer_login is not None:
-            if abs_customer_login.id != abstract_customer.id:
-                abstract_customer.amo_customers = dict_compare_merge(abstract_customer.amo_customers or [],
-                                                                     abs_customer_login.amo_customers or [])
-                abstract_customer.amo_leads = dict_compare_merge(abstract_customer.amo_leads or [],
-                                                                 abs_customer_login.amo_leads or [])
-                abstract_customer.amo_contacts = dict_compare_merge(abstract_customer.amo_contacts or [],
-                                                                    abs_customer_login.amo_contacts or [])
-                abstract_customer.amo_companies = dict_compare_merge(abstract_customer.amo_companies or [],
-                                                                     abs_customer_login.amo_companies or [])
-                flag_modified(abstract_customer, "amo_customers")
-                flag_modified(abstract_customer, "amo_leads")
-                flag_modified(abstract_customer, "amo_contacts")
-                flag_modified(abstract_customer, "amo_companies")
-                db.session.commit()
-                db.session.flush()
-                db.session.delete(abs_customer_login)
-                db.session.commit()
-                return
-
-    return create_or_update_lead(abstract_customer, lead)
-
-
 def collect_leads_customers(is_full: bool = True) -> bool:
     """
     completed=True выставляется только после полного прохода без исключений, чистка запускается только по нему
@@ -248,49 +212,3 @@ def collect_leads_customers(is_full: bool = True) -> bool:
         logger.info(f"Cleanup {run_id=} {result=}")
 
     return completed
-
-
-def filter_merge_abstract_customer(abc_customer: AbstractCustomer, attr: str,
-                                   check_ids: List[int]):
-    entity = abc_customer.__getattribute__(attr)
-    for l in entity:
-        entity = [c for c in entity if
-                  'удалить' not in l['general'].get('name').lower() and l['general'].get('id') in check_ids]
-        setattr(abc_customer, attr, entity)
-        flag_modified(abc_customer, attr)
-        db.session.commit()
-
-
-def filter_abc_customer(abc_customer: AbstractCustomer, ids_map: Dict):
-    if abc_customer.amo_leads:
-        try:
-            filter_merge_abstract_customer(abc_customer=abc_customer,
-                                           attr="amo_leads",
-                                           check_ids=ids_map[abc_customer.id]["leads"])
-        except Exception as e:
-            logger.exception(e)
-    if abc_customer.amo_customers:
-        try:
-            filter_merge_abstract_customer(abc_customer=abc_customer,
-                                           attr="amo_customers",
-                                           check_ids=ids_map[abc_customer.id]["customers"])
-        except Exception as e:
-            logger.exception(e)
-    if abc_customer.amo_contacts:
-        try:
-            filter_merge_abstract_customer(abc_customer=abc_customer,
-                                           attr="amo_contacts",
-                                           check_ids=ids_map[abc_customer.id]["contacts"])
-        except Exception as e:
-            logger.exception(e)
-    if abc_customer.amo_companies:
-        try:
-            filter_merge_abstract_customer(abc_customer=abc_customer,
-                                           attr="amo_companies",
-                                           check_ids=ids_map[abc_customer.id]["companies"])
-        except Exception as e:
-            logger.exception(e)
-    if not abc_customer.amo_leads and not abc_customer.amo_customers:
-        db.session.flush()
-        db.session.delete(abc_customer)
-    db.session.commit()
