@@ -10,7 +10,8 @@ from abstract_customer import get_abccustomer_by_lead_login, create_or_update_cu
     get_abccustomer_by_amocustomer_login, dict_compare_merge, create_or_update_lead
 from amocrm import COMPANIES, CONTACTS, Customer as AmoCustomer, Lead as AmoLead, amocrm_get
 from models import db, AbstractCustomer, Customer, Lead
-from repository import upsert_customers, upsert_leads, load_customers_data, load_leads_data, merge_customers
+from repository import upsert_customers, upsert_leads, load_customers_data, load_leads_data, merge_customers, \
+    cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,9 @@ def collect_leads_customers(is_full: bool = True) -> bool:
     run_id = uuid.uuid4()
     completed = False
 
+    contact_ids = set()
+    company_ids = set()
+
     customers_by_crm_id, customers_by_login = load_customers_data()
     leads_by_crm_id, _ = load_leads_data()
     logger.info(f"Started sync {run_id=} {is_full=} customers={len(customers_by_crm_id)} leads={len(leads_by_crm_id)}")
@@ -191,6 +195,12 @@ def collect_leads_customers(is_full: bool = True) -> bool:
                     continue
 
                 customers_by_crm_id[customer.id] = customer_id
+                for contact in customer.contacts:
+                    if contact.get('id') is not None:
+                        contact_ids.add(contact.get('id'))
+                for company in customer.companies:
+                    if company.get('id') is not None:
+                        company_ids.add(company.get('id'))
                 login = customer.get_field('Логин')
 
                 if not login:
@@ -199,8 +209,7 @@ def collect_leads_customers(is_full: bool = True) -> bool:
                     customers_by_login[login] = None
                 else:
                     customers_by_login[login] = customer_id
-
-        # logger.info(f"Collected customers {run_id=} known={len(customers_by_crm_id)}")
+        logger.info(f"Collected customers {run_id=}")
 
         for batch in iter_lead_batches():
             saved = sync_leads(batch, run_id, customers_by_login, leads_by_crm_id, is_full)
@@ -218,16 +227,25 @@ def collect_leads_customers(is_full: bool = True) -> bool:
                     customer_id = existing[1]
                 if customer_id is None:
                     customer_id = customers_by_login.get(lead.get_field('Логин'))
-                leads_by_crm_id[lead.id] = (lead_id, customer_id)
 
-        # logger.info(f"Collected leads {run_id=} known={len(leads_by_crm_id)}")
+                leads_by_crm_id[lead.id] = (lead_id, customer_id)
+                for contact in lead.contacts:
+                    if contact.get('id') is not None:
+                        contact_ids.add(contact.get('id'))
+                for company in lead.companies:
+                    if company.get('id') is not None:
+                        company_ids.add(company.get('id'))
+
+        logger.info(f"Collected leads {run_id=}")
         completed = True
 
     except Exception as e:
         logger.exception(f"Sync failed {run_id=}: {e}")
 
     if completed and is_full:
-        logger.info(f"Sync completed, cleanup pending {run_id=}")
+        result = cleanup(run_id, contact_ids, company_ids)
+        db.session.commit()
+        logger.info(f"Cleanup {run_id=} {result=}")
 
     return completed
 

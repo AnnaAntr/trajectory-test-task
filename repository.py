@@ -1,5 +1,5 @@
 from typing import Dict, Optional
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from models import Customer, Lead, db
@@ -186,3 +186,68 @@ def merge_customers(first_id: int, second_id: int):
     db.session.execute(delete(Customer).where(Customer.id == second_id))
 
     return True
+
+
+def cleanup(run_id, contact_ids=None, company_ids=None) -> Dict[str, int]:
+    """
+    Удаляет сущности, которых не было в текущем прогоне (last_seen_run_id не равен run_id)
+
+    contact_ids/company_ids — id контактов и компаний, встреченных за прогон
+    Из jsonb_data покупателя вычищаются вложенные элементы не из этих списков и любые элементы с «удалить» в имени
+    Если списки не переданы, вложенные элементы не трогаются
+
+    Возвращает количество изменённых строк по покупателям, сделкам и вложенным элементам
+    """
+    deleted_leads = db.session.execute(
+        delete(Lead).where(Lead.last_seen_run_id.is_distinct_from(run_id))
+    ).rowcount
+    deleted_customers = db.session.execute(
+        delete(Customer).where(Customer.last_seen_run_id.is_distinct_from(run_id))
+    ).rowcount
+
+    updated_customers = 0
+    if contact_ids is not None:
+        query = text("""
+            UPDATE customer
+            SET jsonb_data = jsonb_set(
+                    jsonb_data,
+                    '{contacts}',
+                    COALESCE((
+                        SELECT jsonb_agg(item)
+                        FROM jsonb_array_elements(jsonb_data->'contacts') AS item
+                        WHERE (item->>'id')::bigint = ANY(CAST(:contact_ids AS bigint[]))
+                          AND strpos(lower(COALESCE(item->>'name', '')), 'удалить') = 0
+                    ), '[]'::jsonb)
+                ),
+                updated_at = now()
+            WHERE last_seen_run_id = :run_id
+              AND jsonb_typeof(jsonb_data->'contacts') = 'array'
+        """)
+        updated_customers += db.session.execute(query, {
+            'run_id': run_id,
+            'contact_ids': list(contact_ids),
+        }).rowcount
+
+    if company_ids is not None:
+        query = text("""
+            UPDATE customer
+            SET jsonb_data = jsonb_set(
+                    jsonb_data,
+                    '{companies}',
+                    COALESCE((
+                        SELECT jsonb_agg(item)
+                        FROM jsonb_array_elements(jsonb_data->'companies') AS item
+                        WHERE (item->>'id')::bigint = ANY(CAST(:company_ids AS bigint[]))
+                          AND strpos(lower(COALESCE(item->>'name', '')), 'удалить') = 0
+                    ), '[]'::jsonb)
+                ),
+                updated_at = now()
+            WHERE last_seen_run_id = :run_id
+              AND jsonb_typeof(jsonb_data->'companies') = 'array'
+        """)
+        updated_customers += db.session.execute(query, {
+            'run_id': run_id,
+            'company_ids': list(company_ids),
+        }).rowcount
+
+    return {'leads': deleted_leads, 'customers': deleted_customers, 'nested': updated_customers}
